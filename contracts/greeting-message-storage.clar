@@ -4,6 +4,8 @@
 (define-constant err-message-too-long (err u102))
 (define-constant err-message-not-found (err u103))
 (define-constant err-unauthorized (err u104))
+(define-constant err-already-voted (err u105))
+(define-constant err-cannot-vote-own-message (err u106))
 
 (define-data-var total-messages uint u0)
 (define-data-var max-message-length uint u280)
@@ -25,6 +27,15 @@
   })
 
 (define-map user-message-counts principal uint)
+
+(define-map message-votes uint 
+  {
+    upvotes: uint,
+    downvotes: uint,
+    score: int
+  })
+
+(define-map user-votes {user: principal, message-id: uint} bool)
 
 (define-public (set-greeting (message (string-utf8 280)))
   (let 
@@ -56,6 +67,13 @@
     
     (map-set user-message-counts sender (+ current-count u1))
     (var-set total-messages (+ total-count u1))
+    
+    (map-set message-votes (+ total-count u1)
+      {
+        upvotes: u0,
+        downvotes: u0,
+        score: 0
+      })
     
     (print {
       event: "greeting-set",
@@ -218,6 +236,13 @@
     (map-set user-message-counts user (+ current-count u1))
     (var-set total-messages (+ total-count u1))
     
+    (map-set message-votes (+ total-count u1)
+      {
+        upvotes: u0,
+        downvotes: u0,
+        score: 0
+      })
+    
     {user: user, success: true}
   ))
 
@@ -326,4 +351,226 @@
     })
     
     (ok true)
+  ))
+
+(define-public (vote-message (message-id uint) (is-upvote bool))
+  (let 
+    (
+      (voter tx-sender)
+      (message-data (map-get? message-history message-id))
+      (existing-vote (map-get? user-votes {user: voter, message-id: message-id}))
+      (current-votes (default-to {upvotes: u0, downvotes: u0, score: 0} (map-get? message-votes message-id)))
+    )
+    (asserts! (var-get is-contract-active) err-unauthorized)
+    (asserts! (is-some message-data) err-message-not-found)
+    (asserts! (is-none existing-vote) err-already-voted)
+    
+    (let ((message-sender (get sender (unwrap-panic message-data))))
+      (asserts! (not (is-eq voter message-sender)) err-cannot-vote-own-message)
+      
+      (let 
+        (
+          (new-upvotes (if is-upvote (+ (get upvotes current-votes) u1) (get upvotes current-votes)))
+          (new-downvotes (if is-upvote (get downvotes current-votes) (+ (get downvotes current-votes) u1)))
+          (new-score (if is-upvote (+ (get score current-votes) 1) (- (get score current-votes) 1)))
+        )
+        
+        (map-set message-votes message-id
+          {
+            upvotes: new-upvotes,
+            downvotes: new-downvotes,
+            score: new-score
+          })
+        
+        (map-set user-votes {user: voter, message-id: message-id} is-upvote)
+        
+        (print {
+          event: "message-voted",
+          voter: voter,
+          message-id: message-id,
+          is-upvote: is-upvote,
+          new-score: new-score
+        })
+        
+        (ok new-score)
+      )
+    )))
+
+(define-public (change-vote (message-id uint) (is-upvote bool))
+  (let 
+    (
+      (voter tx-sender)
+      (message-data (map-get? message-history message-id))
+      (existing-vote (map-get? user-votes {user: voter, message-id: message-id}))
+      (current-votes (default-to {upvotes: u0, downvotes: u0, score: 0} (map-get? message-votes message-id)))
+    )
+    (asserts! (var-get is-contract-active) err-unauthorized)
+    (asserts! (is-some message-data) err-message-not-found)
+    (asserts! (is-some existing-vote) err-message-not-found)
+    
+    (let 
+      (
+        (old-vote (unwrap-panic existing-vote))
+        (was-upvote old-vote)
+      )
+      (asserts! (not (is-eq was-upvote is-upvote)) err-already-voted)
+      
+      (let 
+        (
+          (new-upvotes 
+            (if is-upvote 
+              (+ (get upvotes current-votes) u1)
+              (- (get upvotes current-votes) u1)))
+          (new-downvotes 
+            (if is-upvote 
+              (- (get downvotes current-votes) u1)
+              (+ (get downvotes current-votes) u1)))
+          (new-score 
+            (if is-upvote 
+              (+ (get score current-votes) 2)
+              (- (get score current-votes) 2)))
+        )
+        
+        (map-set message-votes message-id
+          {
+            upvotes: new-upvotes,
+            downvotes: new-downvotes,
+            score: new-score
+          })
+        
+        (map-set user-votes {user: voter, message-id: message-id} is-upvote)
+        
+        (print {
+          event: "vote-changed",
+          voter: voter,
+          message-id: message-id,
+          new-vote: is-upvote,
+          new-score: new-score
+        })
+        
+        (ok new-score)
+      )
+    )))
+
+(define-public (remove-vote (message-id uint))
+  (let 
+    (
+      (voter tx-sender)
+      (message-data (map-get? message-history message-id))
+      (existing-vote (map-get? user-votes {user: voter, message-id: message-id}))
+      (current-votes (default-to {upvotes: u0, downvotes: u0, score: 0} (map-get? message-votes message-id)))
+    )
+    (asserts! (var-get is-contract-active) err-unauthorized)
+    (asserts! (is-some message-data) err-message-not-found)
+    (asserts! (is-some existing-vote) err-message-not-found)
+    
+    (let 
+      (
+        (was-upvote (unwrap-panic existing-vote))
+        (new-upvotes (if was-upvote (- (get upvotes current-votes) u1) (get upvotes current-votes)))
+        (new-downvotes (if was-upvote (get downvotes current-votes) (- (get downvotes current-votes) u1)))
+        (new-score (if was-upvote (- (get score current-votes) 1) (+ (get score current-votes) 1)))
+      )
+      
+      (map-set message-votes message-id
+        {
+          upvotes: new-upvotes,
+          downvotes: new-downvotes,
+          score: new-score
+        })
+      
+      (map-delete user-votes {user: voter, message-id: message-id})
+      
+      (print {
+        event: "vote-removed",
+        voter: voter,
+        message-id: message-id,
+        new-score: new-score
+      })
+      
+      (ok new-score)
+    )))
+
+(define-read-only (get-message-votes (message-id uint))
+  (map-get? message-votes message-id))
+
+(define-read-only (get-user-vote (user principal) (message-id uint))
+  (map-get? user-votes {user: user, message-id: message-id}))
+
+(define-read-only (get-message-with-votes (message-id uint))
+  (let 
+    (
+      (message-data (map-get? message-history message-id))
+      (vote-data (map-get? message-votes message-id))
+    )
+    {
+      message: message-data,
+      votes: vote-data
+    }
+  ))
+
+(define-public (get-top-messages (limit uint))
+  (let 
+    (
+      (total-msgs (var-get total-messages))
+      (safe-limit (if (> limit u5) u5 limit))
+    )
+    (if (is-eq total-msgs u0)
+      (ok (list))
+      (ok (get-highest-scored-messages total-msgs safe-limit))
+    )))
+
+(define-private (get-highest-scored-messages (message-count uint) (limit uint))
+  (let 
+    (
+      (msg-1-data (get-message-score-data u1))
+      (msg-2-data (get-message-score-data u2))
+      (msg-3-data (get-message-score-data u3))
+      (msg-4-data (get-message-score-data u4))
+      (msg-5-data (get-message-score-data u5))
+    )
+    (sort-messages-by-score 
+      (filter is-valid-message-data 
+        (list msg-1-data msg-2-data msg-3-data msg-4-data msg-5-data)
+      )
+    )
+  ))
+
+(define-private (get-message-score-data (message-id uint))
+  (let 
+    (
+      (message-data (map-get? message-history message-id))
+      (vote-data (default-to {upvotes: u0, downvotes: u0, score: 0} (map-get? message-votes message-id)))
+    )
+    {
+      message-id: message-id,
+      score: (get score vote-data),
+      message: message-data
+    }
+  ))
+
+(define-private (is-valid-message-data (data {message-id: uint, score: int, message: (optional {sender: principal, message: (string-utf8 280), timestamp: uint, message-id: uint})}))
+  (is-some (get message data)))
+
+(define-private (sort-messages-by-score (messages (list 5 {message-id: uint, score: int, message: (optional {sender: principal, message: (string-utf8 280), timestamp: uint, message-id: uint})})))
+  messages)
+
+(define-read-only (get-voting-stats)
+  (let 
+    (
+      (total-msgs (var-get total-messages))
+      (sample-votes-1 (default-to {upvotes: u0, downvotes: u0, score: 0} (map-get? message-votes u1)))
+      (sample-votes-2 (default-to {upvotes: u0, downvotes: u0, score: 0} (map-get? message-votes u2)))
+      (sample-votes-3 (default-to {upvotes: u0, downvotes: u0, score: 0} (map-get? message-votes u3)))
+    )
+    {
+      total-messages-with-votes: total-msgs,
+      total-upvotes: (+ (+ (get upvotes sample-votes-1) (get upvotes sample-votes-2)) (get upvotes sample-votes-3)),
+      total-downvotes: (+ (+ (get downvotes sample-votes-1) (get downvotes sample-votes-2)) (get downvotes sample-votes-3)),
+      sample-data: {
+        msg-1: sample-votes-1,
+        msg-2: sample-votes-2,
+        msg-3: sample-votes-3
+      }
+    }
   ))
