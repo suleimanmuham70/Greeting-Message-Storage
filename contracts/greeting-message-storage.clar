@@ -6,6 +6,10 @@
 (define-constant err-unauthorized (err u104))
 (define-constant err-already-voted (err u105))
 (define-constant err-cannot-vote-own-message (err u106))
+(define-constant err-invalid-tip-amount (err u107))
+(define-constant err-cannot-tip-own-message (err u108))
+(define-constant err-transfer-failed (err u109))
+(define-constant err-no-tips-to-claim (err u110))
 
 (define-data-var total-messages uint u0)
 (define-data-var max-message-length uint u280)
@@ -36,6 +40,20 @@
   })
 
 (define-map user-votes {user: principal, message-id: uint} bool)
+
+(define-map message-tips uint 
+  {
+    total-tips: uint,
+    tip-count: uint,
+    top-tipper: (optional principal),
+    top-tip-amount: uint
+  })
+
+(define-map user-tips-sent principal uint)
+
+(define-map user-tips-received principal uint)
+
+(define-map creator-pending-tips principal uint)
 
 (define-public (set-greeting (message (string-utf8 280)))
   (let 
@@ -73,6 +91,14 @@
         upvotes: u0,
         downvotes: u0,
         score: 0
+      })
+    
+    (map-set message-tips (+ total-count u1)
+      {
+        total-tips: u0,
+        tip-count: u0,
+        top-tipper: none,
+        top-tip-amount: u0
       })
     
     (print {
@@ -241,6 +267,14 @@
         upvotes: u0,
         downvotes: u0,
         score: 0
+      })
+    
+    (map-set message-tips (+ total-count u1)
+      {
+        total-tips: u0,
+        tip-count: u0,
+        top-tipper: none,
+        top-tip-amount: u0
       })
     
     {user: user, success: true}
@@ -571,6 +605,244 @@
         msg-1: sample-votes-1,
         msg-2: sample-votes-2,
         msg-3: sample-votes-3
+      }
+    }
+  ))
+
+(define-public (tip-message (message-id uint) (amount uint))
+  (let 
+    (
+      (tipper tx-sender)
+      (message-data (map-get? message-history message-id))
+      (current-tips (default-to {total-tips: u0, tip-count: u0, top-tipper: none, top-tip-amount: u0} (map-get? message-tips message-id)))
+    )
+    (asserts! (var-get is-contract-active) err-unauthorized)
+    (asserts! (is-some message-data) err-message-not-found)
+    (asserts! (> amount u0) err-invalid-tip-amount)
+    
+    (let 
+      (
+        (message-creator (get sender (unwrap-panic message-data)))
+        (tipper-sent (default-to u0 (map-get? user-tips-sent tipper)))
+        (creator-received (default-to u0 (map-get? user-tips-received message-creator)))
+        (creator-pending (default-to u0 (map-get? creator-pending-tips message-creator)))
+      )
+      (asserts! (not (is-eq tipper message-creator)) err-cannot-tip-own-message)
+      
+      (match (stx-transfer? amount tipper (as-contract tx-sender))
+        success
+          (let 
+            (
+              (new-total-tips (+ (get total-tips current-tips) amount))
+              (new-tip-count (+ (get tip-count current-tips) u1))
+              (is-top-tip (> amount (get top-tip-amount current-tips)))
+            )
+            
+            (map-set message-tips message-id
+              {
+                total-tips: new-total-tips,
+                tip-count: new-tip-count,
+                top-tipper: (if is-top-tip (some tipper) (get top-tipper current-tips)),
+                top-tip-amount: (if is-top-tip amount (get top-tip-amount current-tips))
+              })
+            
+            (map-set user-tips-sent tipper (+ tipper-sent amount))
+            (map-set user-tips-received message-creator (+ creator-received amount))
+            (map-set creator-pending-tips message-creator (+ creator-pending amount))
+            
+            (print {
+              event: "message-tipped",
+              tipper: tipper,
+              message-id: message-id,
+              creator: message-creator,
+              amount: amount,
+              total-tips: new-total-tips
+            })
+            
+            (ok true)
+          )
+        error err-transfer-failed
+      )
+    )))
+
+(define-public (claim-tips)
+  (let 
+    (
+      (creator tx-sender)
+      (pending-amount (default-to u0 (map-get? creator-pending-tips creator)))
+    )
+    (asserts! (var-get is-contract-active) err-unauthorized)
+    (asserts! (> pending-amount u0) err-no-tips-to-claim)
+    
+    (match (as-contract (stx-transfer? pending-amount tx-sender creator))
+      success
+        (begin
+          (map-set creator-pending-tips creator u0)
+          
+          (print {
+            event: "tips-claimed",
+            creator: creator,
+            amount: pending-amount
+          })
+          
+          (ok pending-amount)
+        )
+      error err-transfer-failed
+    )))
+
+(define-public (tip-multiple-messages (tips (list 5 {message-id: uint, amount: uint})))
+  (begin
+    (asserts! (var-get is-contract-active) err-unauthorized)
+    
+    (let ((results (map process-single-tip tips)))
+      (print {
+        event: "multiple-tips-sent",
+        tipper: tx-sender,
+        count: (len tips)
+      })
+      (ok results)
+    )))
+
+(define-private (process-single-tip (tip-data {message-id: uint, amount: uint}))
+  (let 
+    (
+      (msg-id (get message-id tip-data))
+      (tip-amount (get amount tip-data))
+      (tipper tx-sender)
+      (message-data (map-get? message-history msg-id))
+    )
+    (if (and (is-some message-data) (> tip-amount u0))
+      (let 
+        (
+          (creator (get sender (unwrap-panic message-data)))
+          (current-tips (default-to {total-tips: u0, tip-count: u0, top-tipper: none, top-tip-amount: u0} (map-get? message-tips msg-id)))
+        )
+        (if (not (is-eq tipper creator))
+          (match (stx-transfer? tip-amount tipper (as-contract tx-sender))
+            success
+              (begin
+                (map-set message-tips msg-id
+                  {
+                    total-tips: (+ (get total-tips current-tips) tip-amount),
+                    tip-count: (+ (get tip-count current-tips) u1),
+                    top-tipper: (get top-tipper current-tips),
+                    top-tip-amount: (get top-tip-amount current-tips)
+                  })
+                
+                (map-set creator-pending-tips creator 
+                  (+ (default-to u0 (map-get? creator-pending-tips creator)) tip-amount))
+                
+                {message-id: msg-id, success: true}
+              )
+            error {message-id: msg-id, success: false}
+          )
+          {message-id: msg-id, success: false}
+        )
+      )
+      {message-id: msg-id, success: false}
+    )))
+
+(define-read-only (get-message-tips (message-id uint))
+  (map-get? message-tips message-id))
+
+(define-read-only (get-user-tips-sent (user principal))
+  (default-to u0 (map-get? user-tips-sent user)))
+
+(define-read-only (get-user-tips-received (user principal))
+  (default-to u0 (map-get? user-tips-received user)))
+
+(define-read-only (get-pending-tips (creator principal))
+  (default-to u0 (map-get? creator-pending-tips creator)))
+
+(define-read-only (get-message-with-tips-and-votes (message-id uint))
+  (let 
+    (
+      (message-data (map-get? message-history message-id))
+      (vote-data (map-get? message-votes message-id))
+      (tip-data (map-get? message-tips message-id))
+    )
+    {
+      message: message-data,
+      votes: vote-data,
+      tips: tip-data
+    }
+  ))
+
+(define-read-only (get-user-tipping-stats (user principal))
+  (let 
+    (
+      (sent (default-to u0 (map-get? user-tips-sent user)))
+      (received (default-to u0 (map-get? user-tips-received user)))
+      (pending (default-to u0 (map-get? creator-pending-tips user)))
+    )
+    {
+      total-tips-sent: sent,
+      total-tips-received: received,
+      pending-tips: pending,
+      net-tips: (if (>= received sent) (- received sent) (- sent received)),
+      is-net-receiver: (>= received sent)
+    }
+  ))
+
+(define-public (get-top-tipped-messages (limit uint))
+  (let 
+    (
+      (total-msgs (var-get total-messages))
+      (safe-limit (if (> limit u5) u5 limit))
+    )
+    (if (is-eq total-msgs u0)
+      (ok (list))
+      (ok (get-highest-tipped-messages total-msgs safe-limit))
+    )))
+
+(define-private (get-highest-tipped-messages (message-count uint) (limit uint))
+  (let 
+    (
+      (msg-1-data (get-message-tip-data u1))
+      (msg-2-data (get-message-tip-data u2))
+      (msg-3-data (get-message-tip-data u3))
+      (msg-4-data (get-message-tip-data u4))
+      (msg-5-data (get-message-tip-data u5))
+    )
+    (filter is-valid-tip-message 
+      (list msg-1-data msg-2-data msg-3-data msg-4-data msg-5-data)
+    )
+  ))
+
+(define-private (get-message-tip-data (message-id uint))
+  (let 
+    (
+      (message-data (map-get? message-history message-id))
+      (tip-data (default-to {total-tips: u0, tip-count: u0, top-tipper: none, top-tip-amount: u0} (map-get? message-tips message-id)))
+    )
+    {
+      message-id: message-id,
+      total-tips: (get total-tips tip-data),
+      message: message-data
+    }
+  ))
+
+(define-private (is-valid-tip-message (data {message-id: uint, total-tips: uint, message: (optional {sender: principal, message: (string-utf8 280), timestamp: uint, message-id: uint})}))
+  (and (is-some (get message data)) (> (get total-tips data) u0)))
+
+(define-read-only (get-platform-tipping-stats)
+  (let 
+    (
+      (tip-1 (default-to {total-tips: u0, tip-count: u0, top-tipper: none, top-tip-amount: u0} (map-get? message-tips u1)))
+      (tip-2 (default-to {total-tips: u0, tip-count: u0, top-tipper: none, top-tip-amount: u0} (map-get? message-tips u2)))
+      (tip-3 (default-to {total-tips: u0, tip-count: u0, top-tipper: none, top-tip-amount: u0} (map-get? message-tips u3)))
+      (tip-4 (default-to {total-tips: u0, tip-count: u0, top-tipper: none, top-tip-amount: u0} (map-get? message-tips u4)))
+      (tip-5 (default-to {total-tips: u0, tip-count: u0, top-tipper: none, top-tip-amount: u0} (map-get? message-tips u5)))
+    )
+    {
+      total-platform-tips: (+ (+ (+ (+ (get total-tips tip-1) (get total-tips tip-2)) (get total-tips tip-3)) (get total-tips tip-4)) (get total-tips tip-5)),
+      total-tip-transactions: (+ (+ (+ (+ (get tip-count tip-1) (get tip-count tip-2)) (get tip-count tip-3)) (get tip-count tip-4)) (get tip-count tip-5)),
+      sample-messages: {
+        msg-1: tip-1,
+        msg-2: tip-2,
+        msg-3: tip-3,
+        msg-4: tip-4,
+        msg-5: tip-5
       }
     }
   ))
