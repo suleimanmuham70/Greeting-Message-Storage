@@ -112,6 +112,122 @@
     (ok (+ total-count u1))
   ))
 
+(define-constant max-bookmarks-per-user u20)
+(define-constant err-bookmark-exists (err u111))
+(define-constant err-bookmark-not-found (err u112))
+(define-constant err-bookmark-limit-reached (err u113))
+
+(define-data-var total-bookmarks uint u0)
+
+(define-map user-bookmarks {user: principal, message-id: uint} bool)
+(define-map user-bookmark-count principal uint)
+(define-map bookmark-history uint {user: principal, message-id: uint, timestamp: uint})
+
+(define-public (bookmark-message (message-id uint))
+  (let 
+    (
+      (caller tx-sender)
+      (message-record (map-get? message-history message-id))
+      (existing (map-get? user-bookmarks {user: caller, message-id: message-id}))
+      (count (default-to u0 (map-get? user-bookmark-count caller)))
+      (limit max-bookmarks-per-user)
+    )
+    (asserts! (var-get is-contract-active) err-unauthorized)
+    (asserts! (is-some message-record) err-message-not-found)
+    (asserts! (is-none existing) err-bookmark-exists)
+    (asserts! (< count limit) err-bookmark-limit-reached)
+    (map-set user-bookmarks {user: caller, message-id: message-id} true)
+    (map-set user-bookmark-count caller (+ count u1))
+    (let 
+      (
+        (total (var-get total-bookmarks))
+        (next-id (+ total u1))
+        (ts stacks-block-height)
+      )
+      (map-set bookmark-history next-id {user: caller, message-id: message-id, timestamp: ts})
+      (var-set total-bookmarks next-id)
+      (print {event: "message-bookmarked", user: caller, message-id: message-id, bookmark-id: next-id})
+      (ok true)
+    )
+  ))
+
+(define-public (remove-bookmark (message-id uint))
+  (let 
+    (
+      (caller tx-sender)
+      (existing (map-get? user-bookmarks {user: caller, message-id: message-id}))
+      (count (default-to u0 (map-get? user-bookmark-count caller)))
+    )
+    (asserts! (var-get is-contract-active) err-unauthorized)
+    (asserts! (is-some existing) err-bookmark-not-found)
+    (map-delete user-bookmarks {user: caller, message-id: message-id})
+    (map-set user-bookmark-count caller (if (> count u0) (- count u1) u0))
+    (print {event: "bookmark-removed", user: caller, message-id: message-id})
+    (ok true)
+  ))
+
+(define-read-only (is-bookmarked (user principal) (message-id uint))
+  (map-get? user-bookmarks {user: user, message-id: message-id}))
+
+(define-read-only (get-user-bookmark-count (user principal))
+  (default-to u0 (map-get? user-bookmark-count user)))
+
+(define-read-only (get-recent-bookmarks (user principal) (limit uint))
+  (let 
+    (
+      (total (var-get total-bookmarks))
+      (safe-limit (if (> limit u10) u10 limit))
+      (start (if (> total safe-limit) (- total safe-limit) u1))
+    )
+    (if (is-eq total u0)
+      (ok (list))
+      (ok (build-recent-bookmarks-list user start total))
+    )))
+
+(define-private (build-recent-bookmarks-list (user principal) (start uint) (end uint))
+  (let 
+    (
+      (b1 (if (<= start end) (map-get? bookmark-history start) none))
+      (b2 (if (<= (+ start u1) end) (map-get? bookmark-history (+ start u1)) none))
+      (b3 (if (<= (+ start u2) end) (map-get? bookmark-history (+ start u2)) none))
+      (b4 (if (<= (+ start u3) end) (map-get? bookmark-history (+ start u3)) none))
+      (b5 (if (<= (+ start u4) end) (map-get? bookmark-history (+ start u4)) none))
+      (b6 (if (<= (+ start u5) end) (map-get? bookmark-history (+ start u5)) none))
+      (b7 (if (<= (+ start u6) end) (map-get? bookmark-history (+ start u6)) none))
+      (b8 (if (<= (+ start u7) end) (map-get? bookmark-history (+ start u7)) none))
+      (b9 (if (<= (+ start u8) end) (map-get? bookmark-history (+ start u8)) none))
+      (b10 (if (<= (+ start u9) end) (map-get? bookmark-history (+ start u9)) none))
+    )
+    (unwrap-panic (as-max-len?
+      (concat 
+        (if (and (is-some b1) (is-eq user (get user (unwrap-panic b1)))) (list (unwrap-panic b1)) (list))
+        (concat
+          (if (and (is-some b2) (is-eq user (get user (unwrap-panic b2)))) (list (unwrap-panic b2)) (list))
+          (concat
+            (if (and (is-some b3) (is-eq user (get user (unwrap-panic b3)))) (list (unwrap-panic b3)) (list))
+            (concat
+              (if (and (is-some b4) (is-eq user (get user (unwrap-panic b4)))) (list (unwrap-panic b4)) (list))
+              (concat
+                (if (and (is-some b5) (is-eq user (get user (unwrap-panic b5)))) (list (unwrap-panic b5)) (list))
+                (concat
+                  (if (and (is-some b6) (is-eq user (get user (unwrap-panic b6)))) (list (unwrap-panic b6)) (list))
+                  (concat
+                    (if (and (is-some b7) (is-eq user (get user (unwrap-panic b7)))) (list (unwrap-panic b7)) (list))
+                    (concat
+                      (if (and (is-some b8) (is-eq user (get user (unwrap-panic b8)))) (list (unwrap-panic b8)) (list))
+                      (concat
+                        (if (and (is-some b9) (is-eq user (get user (unwrap-panic b9)))) (list (unwrap-panic b9)) (list))
+                        (if (and (is-some b10) (is-eq user (get user (unwrap-panic b10)))) (list (unwrap-panic b10)) (list))
+                      )
+                    )
+                  )
+                )
+              )
+            )
+          )
+        )
+      ) u10))
+  ))
 (define-public (update-greeting (new-message (string-utf8 280)))
   (let 
     (
