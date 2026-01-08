@@ -111,6 +111,218 @@
     
     (ok (+ total-count u1))
   ))
+ 
+ (define-constant max-tags-per-message u5)
+ (define-constant err-tag-exists (err u114))
+ (define-constant err-tag-limit-reached (err u115))
+ (define-constant err-invalid-tag (err u116))
+ (define-constant err-tag-not-found (err u117))
+ 
+ (define-map message-tag-index uint 
+   {
+     tag1: (optional (string-utf8 32)),
+     tag2: (optional (string-utf8 32)),
+     tag3: (optional (string-utf8 32)),
+     tag4: (optional (string-utf8 32)),
+     tag5: (optional (string-utf8 32)),
+     count: uint
+   })
+ 
+ (define-map tag-metrics (string-utf8 32) 
+   {
+     usage: uint,
+     top-message-id: (optional uint),
+     top-score: int
+   })
+ 
+ (define-private (contains-tag 
+   (idx {tag1: (optional (string-utf8 32)), tag2: (optional (string-utf8 32)), tag3: (optional (string-utf8 32)), tag4: (optional (string-utf8 32)), tag5: (optional (string-utf8 32)), count: uint})
+   (tag (string-utf8 32)))
+   (or 
+     (and (is-some (get tag1 idx)) (is-eq (unwrap-panic (get tag1 idx)) tag))
+     (or 
+       (and (is-some (get tag2 idx)) (is-eq (unwrap-panic (get tag2 idx)) tag))
+       (or 
+         (and (is-some (get tag3 idx)) (is-eq (unwrap-panic (get tag3 idx)) tag))
+         (or 
+           (and (is-some (get tag4 idx)) (is-eq (unwrap-panic (get tag4 idx)) tag))
+           (and (is-some (get tag5 idx)) (is-eq (unwrap-panic (get tag5 idx)) tag))
+         )
+       )
+     )
+   ))
+ 
+ (define-public (tag-message (message-id uint) (tag (string-utf8 32)))
+   (let 
+     (
+       (caller tx-sender)
+       (message-data (map-get? message-history message-id))
+       (existing-index (map-get? message-tag-index message-id))
+       (tag-length (len tag))
+     )
+     (asserts! (var-get is-contract-active) err-unauthorized)
+     (asserts! (is-some message-data) err-message-not-found)
+     (asserts! (> tag-length u0) err-invalid-tag)
+     (if (is-some existing-index)
+       (let 
+         (
+           (idx (unwrap-panic existing-index))
+           (current-count (get count idx))
+           (new-count (+ current-count u1))
+           (score-data (default-to {upvotes: u0, downvotes: u0, score: 0} (map-get? message-votes message-id)))
+           (current-score (get score score-data))
+           (metrics (default-to {usage: u0, top-message-id: none, top-score: 0} (map-get? tag-metrics tag)))
+         )
+         (asserts! (not (contains-tag idx tag)) err-tag-exists)
+         (asserts! (< current-count max-tags-per-message) err-tag-limit-reached)
+         (if (is-none (get tag1 idx))
+           (map-set message-tag-index message-id {tag1: (some tag), tag2: (get tag2 idx), tag3: (get tag3 idx), tag4: (get tag4 idx), tag5: (get tag5 idx), count: new-count})
+           (if (is-none (get tag2 idx))
+             (map-set message-tag-index message-id {tag1: (get tag1 idx), tag2: (some tag), tag3: (get tag3 idx), tag4: (get tag4 idx), tag5: (get tag5 idx), count: new-count})
+             (if (is-none (get tag3 idx))
+               (map-set message-tag-index message-id {tag1: (get tag1 idx), tag2: (get tag2 idx), tag3: (some tag), tag4: (get tag4 idx), tag5: (get tag5 idx), count: new-count})
+               (if (is-none (get tag4 idx))
+                 (map-set message-tag-index message-id {tag1: (get tag1 idx), tag2: (get tag2 idx), tag3: (get tag3 idx), tag4: (some tag), tag5: (get tag5 idx), count: new-count})
+                 (map-set message-tag-index message-id {tag1: (get tag1 idx), tag2: (get tag2 idx), tag3: (get tag3 idx), tag4: (get tag4 idx), tag5: (some tag), count: new-count})
+               )
+             )
+           )
+         )
+         (map-set tag-metrics tag 
+           {
+             usage: (+ (get usage metrics) u1),
+             top-message-id: (if (> current-score (get top-score metrics)) (some message-id) (get top-message-id metrics)),
+             top-score: (if (> current-score (get top-score metrics)) current-score (get top-score metrics))
+           })
+         (print {event: "message-tagged", user: caller, message-id: message-id, tag: tag})
+         (ok true)
+       )
+       (let 
+         (
+           (score-data (default-to {upvotes: u0, downvotes: u0, score: 0} (map-get? message-votes message-id)))
+           (current-score (get score score-data))
+           (metrics (default-to {usage: u0, top-message-id: none, top-score: 0} (map-get? tag-metrics tag)))
+         )
+         (map-set message-tag-index message-id {tag1: (some tag), tag2: none, tag3: none, tag4: none, tag5: none, count: u1})
+         (map-set tag-metrics tag 
+           {
+             usage: (+ (get usage metrics) u1),
+             top-message-id: (if (> current-score (get top-score metrics)) (some message-id) (get top-message-id metrics)),
+             top-score: (if (> current-score (get top-score metrics)) current-score (get top-score metrics))
+           })
+         (print {event: "message-tagged", user: caller, message-id: message-id, tag: tag})
+         (ok true)
+       )
+     )
+   ))
+ 
+ (define-public (untag-message (message-id uint) (tag (string-utf8 32)))
+   (let 
+     (
+       (caller tx-sender)
+       (message-data (map-get? message-history message-id))
+       (existing-index (map-get? message-tag-index message-id))
+       (tag-length (len tag))
+     )
+     (asserts! (var-get is-contract-active) err-unauthorized)
+     (asserts! (is-some message-data) err-message-not-found)
+     (asserts! (> tag-length u0) err-invalid-tag)
+     (asserts! (is-some existing-index) err-tag-not-found)
+     (let 
+       (
+         (idx (unwrap-panic existing-index))
+         (metrics (default-to {usage: u0, top-message-id: none, top-score: 0} (map-get? tag-metrics tag)))
+         (current-count (get count idx))
+         (new-count (if (> current-count u0) (- current-count u1) u0))
+         (t1 (get tag1 idx))
+         (t2 (get tag2 idx))
+         (t3 (get tag3 idx))
+         (t4 (get tag4 idx))
+         (t5 (get tag5 idx))
+       )
+       (asserts! (contains-tag idx tag) err-tag-not-found)
+       (if (and (is-some t1) (is-eq (unwrap-panic t1) tag))
+         (map-set message-tag-index message-id {tag1: none, tag2: t2, tag3: t3, tag4: t4, tag5: t5, count: new-count})
+         (if (and (is-some t2) (is-eq (unwrap-panic t2) tag))
+           (map-set message-tag-index message-id {tag1: t1, tag2: none, tag3: t3, tag4: t4, tag5: t5, count: new-count})
+           (if (and (is-some t3) (is-eq (unwrap-panic t3) tag))
+             (map-set message-tag-index message-id {tag1: t1, tag2: t2, tag3: none, tag4: t4, tag5: t5, count: new-count})
+             (if (and (is-some t4) (is-eq (unwrap-panic t4) tag))
+               (map-set message-tag-index message-id {tag1: t1, tag2: t2, tag3: t3, tag4: none, tag5: t5, count: new-count})
+               (map-set message-tag-index message-id {tag1: t1, tag2: t2, tag3: t3, tag4: t4, tag5: none, count: new-count})
+             )
+           )
+         )
+       )
+       (map-set tag-metrics tag 
+         {
+           usage: (if (> (get usage metrics) u0) (- (get usage metrics) u1) u0),
+           top-message-id: (get top-message-id metrics),
+           top-score: (get top-score metrics)
+         })
+       (print {event: "message-untagged", user: caller, message-id: message-id, tag: tag})
+       (ok true)
+     )
+   ))
+ 
+ (define-read-only (get-message-tags (message-id uint))
+   (let 
+     (
+       (idx (map-get? message-tag-index message-id))
+     )
+     (if (is-none idx)
+       (list)
+       (let 
+         (
+           (rec (unwrap-panic idx))
+           (t1 (get tag1 rec))
+           (t2 (get tag2 rec))
+           (t3 (get tag3 rec))
+           (t4 (get tag4 rec))
+           (t5 (get tag5 rec))
+         )
+         (unwrap-panic (as-max-len?
+           (concat
+             (if (is-some t1) (list (unwrap-panic t1)) (list))
+             (concat
+               (if (is-some t2) (list (unwrap-panic t2)) (list))
+               (concat
+                 (if (is-some t3) (list (unwrap-panic t3)) (list))
+                 (concat
+                   (if (is-some t4) (list (unwrap-panic t4)) (list))
+                   (if (is-some t5) (list (unwrap-panic t5)) (list))
+                 )
+               )
+             )
+           ) u5))
+       )
+     )
+   ))
+ 
+ (define-read-only (is-message-tagged (message-id uint) (tag (string-utf8 32)))
+   (let 
+     (
+       (idx (map-get? message-tag-index message-id))
+     )
+     (if (is-none idx)
+       false
+       (contains-tag (unwrap-panic idx) tag)
+     )
+   ))
+ 
+ (define-read-only (get-message-tag-count (message-id uint))
+   (let 
+     (
+       (idx (map-get? message-tag-index message-id))
+     )
+     (if (is-none idx)
+       u0
+       (get count (unwrap-panic idx))
+     )
+   ))
+ 
+ (define-read-only (get-tag-metrics (tag (string-utf8 32)))
+   (default-to {usage: u0, top-message-id: none, top-score: 0} (map-get? tag-metrics tag)))
 
 (define-constant max-bookmarks-per-user u20)
 (define-constant err-bookmark-exists (err u111))
