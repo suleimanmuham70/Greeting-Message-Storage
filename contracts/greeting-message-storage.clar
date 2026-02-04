@@ -936,6 +936,88 @@
       }
     }
   ))
+ 
+ (define-constant max-slug-length u32)
+ (define-constant err-slug-exists (err u118))
+ (define-constant err-invalid-slug (err u119))
+ (define-constant err-slug-not-found (err u120))
+ (define-constant err-not-message-creator (err u121))
+ 
+ (define-map message-slug-index uint (string-utf8 32))
+ (define-map slug-message-index (string-utf8 32) {message-id: uint, creator: principal})
+ 
+ (define-public (set-message-slug (message-id uint) (slug (string-utf8 32)))
+   (let 
+     (
+       (caller tx-sender)
+       (message-data (map-get? message-history message-id))
+       (slug-len (len slug))
+       (existing-slug (map-get? message-slug-index message-id))
+       (slug-record (map-get? slug-message-index slug))
+     )
+     (asserts! (var-get is-contract-active) err-unauthorized)
+     (asserts! (is-some message-data) err-message-not-found)
+     (asserts! (> slug-len u0) err-invalid-slug)
+     (asserts! (<= slug-len max-slug-length) err-invalid-slug)
+     (asserts! (is-none slug-record) err-slug-exists)
+     (let 
+       (
+         (creator (get sender (unwrap-panic message-data)))
+       )
+       (asserts! (is-eq caller creator) err-not-message-creator)
+       (if (is-some existing-slug)
+         (begin
+           (map-delete slug-message-index (unwrap-panic existing-slug))
+           (map-set message-slug-index message-id slug)
+           (map-set slug-message-index slug {message-id: message-id, creator: creator})
+           (print {event: "message-slug-updated", user: caller, message-id: message-id, slug: slug})
+           (ok slug)
+         )
+         (begin
+           (map-set message-slug-index message-id slug)
+           (map-set slug-message-index slug {message-id: message-id, creator: creator})
+           (print {event: "message-slug-set", user: caller, message-id: message-id, slug: slug})
+           (ok slug)
+         )
+       )
+     )
+   ))
+ 
+ (define-public (clear-message-slug (message-id uint))
+   (let 
+     (
+       (caller tx-sender)
+       (message-data (map-get? message-history message-id))
+       (current-slug (map-get? message-slug-index message-id))
+     )
+     (asserts! (var-get is-contract-active) err-unauthorized)
+     (asserts! (is-some message-data) err-message-not-found)
+     (asserts! (is-some current-slug) err-slug-not-found)
+     (let ((creator (get sender (unwrap-panic message-data))))
+       (asserts! (is-eq caller creator) err-not-message-creator)
+       (map-delete slug-message-index (unwrap-panic current-slug))
+       (map-delete message-slug-index message-id)
+       (print {event: "message-slug-cleared", user: caller, message-id: message-id})
+       (ok true)
+     )
+   ))
+ 
+ (define-read-only (get-message-by-slug (slug (string-utf8 32)))
+   (let 
+     (
+       (record (map-get? slug-message-index slug))
+     )
+     (if (is-some record)
+       (map-get? message-history (get message-id (unwrap-panic record)))
+       none
+     )
+   ))
+ 
+ (define-read-only (get-slug (message-id uint))
+   (map-get? message-slug-index message-id))
+ 
+ (define-read-only (is-slug-available (slug (string-utf8 32)))
+   (is-none (map-get? slug-message-index slug)))
 
 (define-public (tip-message (message-id uint) (amount uint))
   (let 
